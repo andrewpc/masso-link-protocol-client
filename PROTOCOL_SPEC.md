@@ -57,6 +57,23 @@ Example from a MASSO Link capture at 13:20:58 on 28 Nov 2025:
 - Sent about once per second while connected.
 - **Response**: 270 bytes (status packet)
 
+### Short Status / Job Counter Reset (Type 0x05)
+- **Request**: 10 bytes total, magic `0x03 0x00`, type `0x05`, 5 zero bytes (payload meaning untested)
+- **Response**: 10 bytes, e.g. `aa cc 03 00 05 64 00 ff 7f 00`. The 5 payload bytes match status bytes 5-9 from just before the request (progress, run flag, fault byte, job count low bytes).
+- **Side effect**: the request zeroes the job counter (status byte 8 went from `0x7f` to `0x00`; the user confirmed the machine's job counter read 0 afterwards). This is a control function, not a read-only query. Repeated once: the reply then carried counter 0 and nothing changed. Clearing a non-zero counter was seen once on v5.13.
+
+### Short Status Query (Type 0x07)
+- **Request**: 10 bytes total, type `0x07`, 5 zero bytes
+- **Response**: 10 bytes, `.. .. 03 00 07 <b5> <b6> <b7> <b8> <b9>`, the same five bytes as status bytes 5-9 (progress, run flag, fault byte, job count low bytes). Seen as `64 00 ff 00 00` with the counter at 0 and `64 00 ff 01 00` with it at 1.
+- Read-only: the counter and status were unchanged afterwards (v5.13). Unlike 0x05, it does not clear the counter.
+
+### Type 0x0C
+- **Request**: type `0x0C` with 1 to 13 payload bytes (any value, including `ff`). An empty payload and a `5c 00 <name> 00` payload got no reply.
+- **Response**: always the same 10 bytes, `3a 09 03 00 0b 02 55 53 45 52`: type byte `0x0B`, then `02` and ASCII `USER`. It does not depend on the payload. Meaning unknown; likely a constant identity or mode string. No state change (v5.13).
+
+### Other Type Bytes
+Every other type byte from 0x00 to 0xFF except 0x01-0x03, 0x08, 0x0A and 0x0B was sent once with a valid CRC and a 5-byte zero payload on v5.13. 0x04, 0x06, 0x09, 0x0D-0x0F and 0x10-0xFF got no reply and no state change. The controller stayed responsive throughout. A function that needs a longer argument would look silent here, so this rules out only 5-byte-payload commands. File delete was hunted specifically: types 0x04, 0x06, 0x09 and 0x0D-0x0F were sent with `5c 00 <name> 00` and with the start-upload layout (`00 00 00 00 00 00 01 5c 00 <name> 00`), first for a missing name and then for an uploaded test file. All were silent and the file stayed on the controller (v5.13), so no delete was found with those types and layouts. Earlier notes describing 0x04, 0x06 and 0x10-0x1F as functional came from packets sent without a CRC and are not reliable.
+
 ### Tool Data Request (Type 0x08)
 - **Request**: 10 bytes total
   - Magic: `0x03 0x00`
@@ -67,6 +84,9 @@ Example from a MASSO Link capture at 13:20:58 on 28 Nov 2025:
 - **Response**: 38 bytes
   - Tool index at byte 5
   - Tool name starts at byte 6, null-terminated
+  - Index 0 is a real entry (v5.13 lathe: "Dry Run-Laser Pointer"), not an error.
+  - An unused index (0x32, 0xFF tested) returns `00 ff 01 00 00 00 01 00 00 00 00` from byte 6 instead of a name. Do not treat those bytes as text.
+  - Bytes after the name's null terminator are stale buffer content, not tool data: they held fragments of file names uploaded earlier (`zz.nc`, `t-2.nc`). Ignore them.
 
 ### File Upload - Start Upload (Type 0x0A)
 - **Request**: Variable length
