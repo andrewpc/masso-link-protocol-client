@@ -261,6 +261,45 @@ class TestFilenameValidation(unittest.TestCase):
                 self.assertEqual(p[:2], self.client._calculate_checksum(p[2:]))
 
 
+class TestDatePrefix(unittest.TestCase):
+    """MMDD- prefix applied to remote names by manual upload and watch mode"""
+
+    NOW = datetime(2026, 9, 29, 14, 16, 9)
+
+    def test_adds_prefix(self):
+        name, warning = MassoClient.apply_date_prefix("part.nc", self.NOW)
+        self.assertEqual(name, "0929-part.nc")
+        self.assertIsNone(warning)
+
+    def test_prefixes_file_part_only_and_keeps_separators(self):
+        for remote in ("jobs\\part.nc", "jobs/part.nc", "\\jobs\\sub\\part.nc"):
+            with self.subTest(remote=remote):
+                split = max(remote.rfind("/"), remote.rfind("\\")) + 1
+                name, _ = MassoClient.apply_date_prefix(remote, self.NOW)
+                self.assertEqual(name, remote[:split] + "0929-part.nc")
+
+    def test_no_double_prefix(self):
+        name, warning = MassoClient.apply_date_prefix("0929-part.nc", self.NOW)
+        self.assertEqual(name, "0929-part.nc")
+        self.assertIsNone(warning)
+
+    def test_other_dates_still_get_prefixed(self):
+        name, _ = MassoClient.apply_date_prefix("0928-part.nc", self.NOW)
+        self.assertEqual(name, "0929-0928-part.nc")
+
+    def test_too_long_falls_back_with_warning(self):
+        original = "x" * 250 + ".nc"  # 253 chars; prefix would make 258
+        name, warning = MassoClient.apply_date_prefix(original, self.NOW)
+        self.assertEqual(name, original)
+        self.assertIn("too long", warning)
+
+    def test_fits_exactly_at_limit(self):
+        original = "x" * (MassoClient.MAX_REMOTE_NAME_LEN - 5)
+        name, warning = MassoClient.apply_date_prefix(original, self.NOW)
+        self.assertEqual(len(name), MassoClient.MAX_REMOTE_NAME_LEN)
+        self.assertIsNone(warning)
+
+
 def run_tests():
     """Run all tests and report results"""
     # Create test suite

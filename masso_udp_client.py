@@ -383,6 +383,27 @@ class MassoClient:
     MAX_REMOTE_NAME_LEN = 254
 
     @classmethod
+    def apply_date_prefix(cls, remote_name, now=None):
+        """Add an MMDD- prefix to the file part of a remote name.
+
+        Returns (name, warning). The prefix is skipped when the name already starts
+        with today's prefix, and when it would push the name over MAX_REMOTE_NAME_LEN
+        (then the original name is returned with a warning). Any folder part and its
+        separators are left as given.
+        """
+        prefix = (now or datetime.now()).strftime('%m%d-')
+        split = max(remote_name.rfind('/'), remote_name.rfind('\\')) + 1
+        folder, base = remote_name[:split], remote_name[split:]
+        if base.startswith(prefix):
+            return remote_name, None
+        prefixed = folder + prefix + base
+        if len(prefixed) > cls.MAX_REMOTE_NAME_LEN:
+            return remote_name, (f"Date prefix would make filename too long "
+                                 f"({len(prefixed)} chars, max {cls.MAX_REMOTE_NAME_LEN}); "
+                                 f"using original name: {remote_name}")
+        return prefixed, None
+
+    @classmethod
     def _validate_remote_name(cls, name):
         """Return an error message if the remote name can't be used, else None."""
         if not name:
@@ -940,15 +961,9 @@ class MassoClient:
                     # Apply date prefix if enabled
                     remote_filename = basename
                     if hasattr(self, '_watch_date_prefix') and self._watch_date_prefix:
-                        date_prefix = datetime.now().strftime('%m%d-')
-                        name, ext = os.path.splitext(basename)
-                        prefixed_filename = f"{date_prefix}{name}{ext}"
-                        # Check if prefixed filename fits within the remote name limit
-                        if len(prefixed_filename) <= self.MAX_REMOTE_NAME_LEN:
-                            remote_filename = prefixed_filename
-                        else:
-                            print(f"[-] Date prefix would make filename too long ({len(prefixed_filename)} chars, max {self.MAX_REMOTE_NAME_LEN})")
-                            print(f"    Using original filename: {basename}")
+                        remote_filename, warning = self.apply_date_prefix(basename)
+                        if warning:
+                            print(f"[-] {warning}")
                     
                     if len(remote_filename) > self.MAX_REMOTE_NAME_LEN:
                         print(f"[-] Skipping {remote_filename} - filename too long ({len(remote_filename)} chars, max {self.MAX_REMOTE_NAME_LEN})")
@@ -1057,30 +1072,15 @@ def upload_mode(client, args, enable_logging=False):
         parts = upload_spec.split(':', 1)
         if len(parts) == 2:
             local_file, remote_path = parts
-            # Apply date prefix if requested and no custom remote path specified
-            if args.date_prefix:
-                filename = os.path.basename(remote_path)
-                if not filename.startswith('..'):  # Don't modify absolute paths
-                    date_prefix = datetime.now().strftime('%m%d-')
-                    name, ext = os.path.splitext(filename)
-                    prefixed_filename = f"{date_prefix}{name}{ext}"
-                    # Replace the filename in the remote path
-                    remote_dir = os.path.dirname(remote_path)
-                    if remote_dir:
-                        remote_path = os.path.join(remote_dir, prefixed_filename).replace('\\', '/')
-                    else:
-                        remote_path = prefixed_filename
-            client.upload_file(local_file, remote_path=remote_path)
         else:
-            # Apply date prefix if requested
-            if args.date_prefix:
-                filename = os.path.basename(upload_spec)
-                date_prefix = datetime.now().strftime('%m%d-')
-                name, ext = os.path.splitext(filename)
-                prefixed_filename = f"{date_prefix}{name}{ext}"
-                client.upload_file(upload_spec, remote_path=prefixed_filename)
-            else:
-                client.upload_file(upload_spec)
+            local_file, remote_path = upload_spec, None
+
+        if args.date_prefix:
+            # Prefix the remote name (or the local file name when none is given)
+            remote_path, warning = client.apply_date_prefix(remote_path or os.path.basename(local_file))
+            if warning:
+                print(f"[-] {warning}")
+        client.upload_file(local_file, remote_path=remote_path)
 
 def watch_mode(client, args, enable_logging=False):
     """Run watch mode - monitor directory for changes."""

@@ -350,7 +350,9 @@ python masso_udp_client.py --host <IP> --upload file1.nc file2.nc --date-prefix
 
 ### Smart Filename Handling
 - **Length validation**: Respects the 254-character filename limit
-- **Fallback behavior**: Uses original filename if prefix makes it too long
+- **Fallback behavior**: Uses original filename if prefix makes it too long (same for manual and watch uploads)
+- **Folders**: Only the file part of a remote path is prefixed, e.g. `jobs\part.nc` becomes `jobs\0929-part.nc`
+- **No double prefix**: A name that already starts with today's prefix is left alone
 - **Clear feedback**: Shows when prefix is applied or skipped
 - **Consistent behavior**: Works same for manual and watch uploads
 
