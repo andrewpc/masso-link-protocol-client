@@ -8,6 +8,7 @@ Tests packet building, protocol compliance, and core functionality.
 import unittest
 import sys
 import os
+from datetime import datetime
 from unittest.mock import Mock, patch, MagicMock
 
 # Add the current directory to the path so we can import masso_udp_client
@@ -24,34 +25,37 @@ class TestPacketBuilding(unittest.TestCase):
         self.client = MassoClient()
     
     def test_config_packet_structure(self):
-        """Test configuration packet has correct structure with zeros"""
+        """Test configuration packet carries the PC time (zeros would reset the controller clock)"""
+        self.client._connect_time = datetime(2026, 9, 29, 14, 16, 9)
         packet = self.client._build_config_packet()
-        
+
         # Packet should be 14 bytes total (12 payload + 2 checksum)
         self.assertEqual(len(packet), 14)
-        
+
         # Magic bytes and type
         self.assertEqual(packet[2:5], b'\x03\x00\x03')
-        
-        # All unknown bytes should be zeros (9 bytes)
-        self.assertEqual(packet[5:14], b'\x00' * 9)
+
+        # hour minute second day month year, then 3 zero bytes
+        self.assertEqual(packet[5:11], bytes([14, 16, 9, 29, 9, 26]))
+        self.assertEqual(packet[11:14], b'\x00' * 3)
         
         # Verify checksum is calculated (not zero)
         checksum = int.from_bytes(packet[0:2], 'little')
         self.assertNotEqual(checksum, 0)
     
     def test_keepalive_packet_structure(self):
-        """Test keepalive packet has correct structure with zeros"""
+        """Test keepalive packet carries the connect time"""
+        self.client._connect_time = datetime(2026, 9, 29, 14, 16, 9)
         packet = self.client._build_keepalive_packet()
-        
+
         # Packet should be 10 bytes total (8 payload + 2 checksum)
         self.assertEqual(len(packet), 10)
-        
+
         # Magic bytes and type
         self.assertEqual(packet[2:5], b'\x03\x00\x01')
-        
-        # All unknown bytes should be zeros (5 bytes)
-        self.assertEqual(packet[5:10], b'\x00' * 5)
+
+        # hour minute second day month
+        self.assertEqual(packet[5:10], bytes([14, 16, 9, 29, 9]))
         
         # Verify checksum is calculated (not zero)
         checksum = int.from_bytes(packet[0:2], 'little')
@@ -67,8 +71,10 @@ class TestPacketBuilding(unittest.TestCase):
         # Magic bytes and type
         self.assertEqual(packet[2:5], b'\x03\x00\x02')
         
-        # Fixed payload
-        self.assertEqual(packet[5:10], b'\xf8\x2a\x00\x00\x0b')
+        # Fixed payload; last byte is the month (not checked by the controller)
+        self.client._connect_time = datetime(2026, 9, 29, 14, 16, 9)
+        packet = self.client._build_discovery_packet()
+        self.assertEqual(packet[5:10], b'\xf8\x2a\x00\x00\x09')
         
         # Verify checksum is calculated
         checksum = int.from_bytes(packet[0:2], 'little')
@@ -279,6 +285,45 @@ def run_tests():
     
     # Return success/failure
     return result.wasSuccessful()
+
+
+class TestUploadPackets(unittest.TestCase):
+    """Data chunk and tool request packets (values verified against captures and a v5.13 controller)"""
+
+    def setUp(self):
+        self.client = MassoClient()
+
+    def test_tool_request_tail_is_connect_time(self):
+        """Tool request ends with minute, second, day, month (captures: 22 2c 1c 0b at 13:34:44 on 28 Nov)"""
+        self.client._connect_time = datetime(2025, 11, 28, 13, 34, 44)
+        packet = self.client._build_tool_request_packet(1)
+        self.assertEqual(packet[2:], bytes([0x03, 0x00, 0x08, 0x01, 0x22, 0x2c, 0x1c, 0x0b]))
+
+    def test_short_final_chunk_trailer_rule(self):
+        """Payload after the CRC is a multiple of 4: trailer = (-(11 + len)) % 4, 0 becomes 4"""
+        # 863 -> 2 (v5.09 capture, 878 byte packet), 1003 -> 2, 442 -> 3, 1021 -> 4, 906 -> 3
+        expected = {863: 2, 1003: 2, 442: 3, 1021: 4, 906: 3, 1000: 1, 1001: 4, 1002: 3}
+        for length, trailer in expected.items():
+            self.assertEqual(MassoClient._chunk_trailer_len(length), trailer, length)
+
+    def test_data_packet_lengths(self):
+        """Full chunk is 1438 bytes; short final chunk is 13 + len + trailer"""
+        full = self.client._build_data_packet(0, b'a' * 1422, 3)
+        self.assertEqual(len(full), 1438)
+        short = self.client._build_data_packet(321, b'b' * 863, MassoClient._chunk_trailer_len(863))
+        self.assertEqual(len(short), 878)
+        self.assertEqual(int.from_bytes(short[5:9], 'little'), 321)
+        self.assertEqual(int.from_bytes(short[9:13], 'little'), 863)
+
+    def test_data_packet_full_wire_fallback(self):
+        """Fallback keeps the real length field but pads the data area to full size"""
+        packet = self.client._build_data_packet(0, b'c' * 411, 3, pad_to=1422)
+        self.assertEqual(len(packet), 1438)
+        self.assertEqual(int.from_bytes(packet[9:13], 'little'), 411)
+
+    def test_data_packet_checksum(self):
+        packet = self.client._build_data_packet(5, b'x' * 100, 3)
+        self.assertEqual(packet[:2], self.client._calculate_checksum(packet[2:]))
 
 
 if __name__ == '__main__':

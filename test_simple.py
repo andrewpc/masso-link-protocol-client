@@ -8,6 +8,7 @@ Focuses on core functionality that can be tested without hardware.
 import unittest
 import sys
 import os
+from datetime import datetime
 
 # Add the current directory to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -65,24 +66,27 @@ class TestPacketBuilding(unittest.TestCase):
         self.assertEqual(len(packet), 10)  # 8 payload + 2 checksum
     
     def test_config_packet_zeros(self):
-        """Test config packet uses zeros for unknown bytes"""
+        """Test config packet carries the PC time and zero trailing bytes"""
+        self.client._connect_time = datetime(2026, 9, 29, 14, 16, 9)
         packet = self.client._build_config_packet()
-        
+
         # Magic bytes and type
         self.assertEqual(packet[2:5], b'\x03\x00\x03')
-        
-        # All unknown bytes should be zeros (9 bytes)
-        self.assertEqual(packet[5:14], b'\x00' * 9)
+
+        # hour minute second day month year, then 3 zero bytes
+        self.assertEqual(packet[5:11], bytes([14, 16, 9, 29, 9, 26]))
+        self.assertEqual(packet[11:14], b'\x00' * 3)
     
     def test_keepalive_packet_zeros(self):
-        """Test keepalive packet uses zeros for unknown bytes"""
+        """Test keepalive packet carries the connect time"""
+        self.client._connect_time = datetime(2026, 9, 29, 14, 16, 9)
         packet = self.client._build_keepalive_packet()
-        
+
         # Magic bytes and type
         self.assertEqual(packet[2:5], b'\x03\x00\x01')
-        
-        # All unknown bytes should be zeros (5 bytes)
-        self.assertEqual(packet[5:10], b'\x00' * 5)
+
+        # hour minute second day month
+        self.assertEqual(packet[5:10], bytes([14, 16, 9, 29, 9]))
     
     def test_checksum_consistency(self):
         """Test checksum calculation is consistent"""

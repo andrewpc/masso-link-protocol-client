@@ -44,39 +44,55 @@ class MassoClient:
         self._watch_directory = None
         self._watch_state_file = None  # Path to state file for tracking uploads
         self._packets_received = 0  # Counter for connection verification
+        self._connect_time = None  # PC time snapshot sent to the controller (sets its clock)
         
+    def _clock(self):
+        """PC time snapshot used in packets; fixed at connect time like MASSO Link."""
+        if self._connect_time is None:
+            self._connect_time = datetime.now()
+        return self._connect_time
+
     def _build_tool_request_packet(self, tool_index):
         """Build a tool data request packet for the given tool index."""
         if tool_index < 1 or tool_index > 255:
             raise ValueError("Tool index must be between 1 and 255")
         
-        # Packet structure: [CRC16][Magic 0x03 0x00][Type 0x08][Tool Index][Payload 22 2c 1c 0b]
+        # Packet structure: [CRC16][Magic 0x03 0x00][Type 0x08][Tool Index][minute second day month]
         # Checksum is calculated over magic + type + index + payload (bytes 2+)
-        payload = bytes([0x03, 0x00, 0x08, tool_index, 0x22, 0x2c, 0x1c, 0x0b])
+        # The 4 trailing bytes are the connect time (captures: 22 2c 1c 0b = 34:44 on 28 Nov)
+        t = self._clock()
+        payload = bytes([0x03, 0x00, 0x08, tool_index, t.minute, t.second, t.day, t.month])
         checksum = self._calculate_checksum(payload)
         return checksum + payload
     
     def _build_discovery_packet(self):
         """Build discovery packet."""
-        payload = bytes([0x03, 0x00, 0x02, 0xf8, 0x2a, 0x00, 0x00, 0x0b])
+        # Last byte was the month in MASSO Link captures but the controller does not check it
+        payload = bytes([0x03, 0x00, 0x02, 0xf8, 0x2a, 0x00, 0x00, self._clock().month])
         checksum = self._calculate_checksum(payload)
         return checksum + payload
     
     def _build_config_packet(self):
-        """Build configuration packet."""
+        """Build configuration packet.
+
+        Carries the PC time; the controller sets its clock from it (all zeros
+        resets the controller clock to 12:00 AM).
+        """
+        t = self._clock()
         payload = bytes([
             0x03, 0x00, 0x03,  # Magic + Type
-            0x00, 0x00, 0x00, 0x00, 0x00,  # Unknown 5 bytes (unused by controller)
-            0x00, 0x00, 0x00, 0x00  # Unknown 4 bytes (unused by controller)
+            t.hour, t.minute, t.second, t.day, t.month, t.year % 100,
+            0x00, 0x00, 0x00  # Unknown 3 bytes (always zero in captures)
         ])
         checksum = self._calculate_checksum(payload)
         return checksum + payload
     
     def _build_keepalive_packet(self):
         """Build keepalive packet."""
+        t = self._clock()
         payload = bytes([
             0x03, 0x00, 0x01,  # Magic + Type
-            0x00, 0x00, 0x00, 0x00, 0x00  # Zero timestamp (controller ignores these)
+            t.hour, t.minute, t.second, t.day, t.month  # Connect time, as sent by MASSO Link
         ])
         checksum = self._calculate_checksum(payload)
         return checksum + payload
@@ -112,6 +128,7 @@ class MassoClient:
             return False
         
         print(f"[+] Connecting to {self.host}...")
+        self._connect_time = datetime.now()
         
         # 1. Discovery
         print("    Sending Discovery...")
@@ -316,7 +333,11 @@ class MassoClient:
             print(f"    Sending Start Upload (Length: {len(packet)} bytes)...")
             
             # Send with retry
-            start_ack = self._send_with_retry(packet, 0x0A, "Start Upload", max_retries)
+            # Byte 5 is the accepted flag. Byte 6+ holds the previous upload's chunk
+            # counter, so it must not be required to be zero.
+            start_ack = self._send_with_retry(
+                packet, 0x0A, "Start Upload", max_retries,
+                ack_check=lambda ack: ack[5] == 0x00)
             if not start_ack:
                 print("[-] Failed to start upload")
                 return False
@@ -335,26 +356,31 @@ class MassoClient:
                     if actual_len == 0:
                         break
 
-                    if actual_len < chunk_size:
-                        chunk = chunk + b"\x00" * (chunk_size - actual_len)
-                    chunk_len = chunk_size
-
-                    # Build data packet
-                    payload = bytearray()
-                    payload.extend(b'\x03\x00')
-                    payload.append(0x0B)
-                    payload.extend(chunk_index.to_bytes(4, 'little'))  # Chunk index, not byte offset
-                    payload.extend(chunk_len.to_bytes(4, 'little'))     # Observed as chunk length in capture
-                    payload.extend(chunk)
-                    payload.extend(b"\x00\x00\x00")  # Observed 3-byte pad in capture
-
-                    checksum = self._calculate_checksum(payload)
-                    packet = checksum + payload
+                    # Chunk index (not byte offset) and length field, then data and trailer.
+                    # A short final chunk is sent compact with its real length; the payload
+                    # after the CRC must be a multiple of 4 bytes, so the trailer is 1-4 bytes.
+                    # (Verified on v5.13: length 1003 needs a 2 byte trailer, 4 is ignored.)
+                    is_short_final = actual_len < chunk_size
+                    trailer_len = self._chunk_trailer_len(actual_len) if is_short_final else 3
+                    packet = self._build_data_packet(chunk_index, chunk, trailer_len)
 
                     progress = min((file_offset + actual_len) / filesize * 100, 100.0)
                     print(f"\r    Sending chunk {chunk_index + 1}/{total_chunks} ({progress:.1f}%)", end='')
 
-                    if not self._send_with_retry(packet, 0x0B, f"Chunk {chunk_index + 1}", max_retries):
+                    # ACK carries the next expected chunk number, little-endian from byte 6
+                    def chunk_ack_ok(ack, expected=chunk_index + 1):
+                        return int.from_bytes(ack[6:8], 'little') == expected
+
+                    sent = self._send_with_retry(packet, 0x0B, f"Chunk {chunk_index + 1}",
+                                                 max_retries, ack_check=chunk_ack_ok)
+                    if not sent and is_short_final:
+                        # Some controllers ignore the compact final packet: retry padded out
+                        # to full size on the wire, keeping the real length field.
+                        print("\n    Retrying final chunk as full-size packet...")
+                        packet = self._build_data_packet(chunk_index, chunk, 3, pad_to=chunk_size)
+                        sent = self._send_with_retry(packet, 0x0B, f"Chunk {chunk_index + 1}",
+                                                     max_retries, ack_check=chunk_ack_ok)
+                    if not sent:
                         print(f"\n[-] Failed to send chunk {chunk_index + 1}, aborting")
                         return False
 
@@ -370,8 +396,27 @@ class MassoClient:
             traceback.print_exc()
             return False
             
-    def _send_with_retry(self, packet, expected_ack_type, description, max_retries=3):
-        """Helper to send a packet and wait for ACK with retries."""
+    @staticmethod
+    def _chunk_trailer_len(chunk_len):
+        """Trailer bytes for a short final chunk: payload after the CRC is a multiple of 4."""
+        return (-(11 + chunk_len)) % 4 or 4
+
+    def _build_data_packet(self, chunk_index, data, trailer_len, pad_to=None):
+        """Build a data chunk (type 0x0B). The length field is always the real data length."""
+        payload = bytearray(b'\x03\x00\x0B')
+        payload.extend(chunk_index.to_bytes(4, 'little'))
+        payload.extend(len(data).to_bytes(4, 'little'))
+        payload.extend(data)
+        if pad_to and len(data) < pad_to:
+            payload.extend(b'\x00' * (pad_to - len(data)))
+        payload.extend(b'\x00' * trailer_len)
+        return self._calculate_checksum(payload) + bytes(payload)
+
+    def _send_with_retry(self, packet, expected_ack_type, description, max_retries=3, ack_check=None):
+        """Helper to send a packet and wait for ACK with retries.
+
+        ack_check, if given, receives the 10-byte ACK and must return True to accept it.
+        """
         for attempt in range(max_retries + 1):
             self._upload_ack_received.clear()
             self._last_ack_packet = None
@@ -381,7 +426,8 @@ class MassoClient:
             if self._upload_ack_received.wait(timeout=2.0):
                 # Check if we got the expected ACK type
                 if hasattr(self, '_last_ack_type') and self._last_ack_type == expected_ack_type:
-                    return True
+                    if ack_check is None or ack_check(self._last_ack_packet):
+                        return True
 
             if attempt < max_retries:
                 print(f"    {description} attempt {attempt + 1} failed, retrying...")
