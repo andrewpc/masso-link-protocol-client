@@ -297,6 +297,8 @@ class MassoClient:
                 remote_filename = basename
                 print(f"[+] Uploading {basename} ({filesize} bytes)...")
             
+            remote_filename = self._normalize_remote_name(remote_filename)
+
             name_error = self._validate_remote_name(remote_filename)
             if name_error:
                 print(f"[-] {name_error}")
@@ -381,6 +383,15 @@ class MassoClient:
     # v5.13: 254 characters is stored intact, 255 uploads but keeps only a short 8.3 alias,
     # and 256 gets no reply (and appeared to hang the controller), so refuse it up front.
     MAX_REMOTE_NAME_LEN = 254
+
+    @staticmethod
+    def _normalize_remote_name(name):
+        """Use backslash as the folder separator.
+
+        The controller ignores the start packet when the name contains '/' (v5.13), so the
+        upload would otherwise fail after all retries. The folder itself must already exist.
+        """
+        return name.replace('/', '\\')
 
     @classmethod
     def _validate_remote_name(cls, name):

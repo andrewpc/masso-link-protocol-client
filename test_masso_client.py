@@ -244,6 +244,14 @@ class TestFilenameValidation(unittest.TestCase):
             with self.subTest(length=len(name)):
                 self.assertIsNotNone(MassoClient._validate_remote_name(name))
 
+    def test_forward_slash_becomes_backslash(self):
+        """v5.13 ignores a start packet whose name contains '/'"""
+        norm = MassoClient._normalize_remote_name
+        self.assertEqual(norm("MASSO/part.nc"), "MASSO\\part.nc")
+        self.assertEqual(norm("a/b/c.nc"), "a\\b\\c.nc")
+        self.assertEqual(norm("MASSO\\part.nc"), "MASSO\\part.nc")
+        self.assertEqual(norm("part.nc"), "part.nc")
+
     def test_start_packet_matches_captures(self):
         """30 bytes for 'adaptive.nc' (file-upload2) and 34 for '1st-test-al.nc' (file-upload)"""
         p = self.client._build_start_packet(457325, "adaptive.nc")
