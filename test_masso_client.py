@@ -227,37 +227,38 @@ class TestStatusPacketParsing(unittest.TestCase):
 
 
 class TestFilenameValidation(unittest.TestCase):
-    """Test filename validation for uploads"""
-    
-    def test_valid_filenames(self):
-        """Test valid filename validation"""
-        valid_filenames = [
-            "test.nc",
-            "program1.nc", 
-            "short.nc",
-            "a.nc",  # Minimum valid length
-            "123456789012345.nc"  # Exactly 15 chars before .nc
-        ]
-        
-        for filename in valid_filenames:
-            with self.subTest(filename=filename):
-                # Test basic filename length validation
-                base_name = os.path.splitext(filename)[0]
-                self.assertLessEqual(len(base_name), 15)
-    
-    def test_invalid_filenames(self):
-        """Test invalid filename detection"""
-        invalid_filenames = [
-            "toolongfilenamehere.nc",  # Base name > 15 chars (19 chars)
-            "verylongprogramname.nc",  # Base name > 15 chars (20 chars)
-            "sixteenncharsname.nc"     # Base name > 15 chars (16 chars)
-        ]
-        
-        for filename in invalid_filenames:
-            with self.subTest(filename=filename):
-                # Test filename length validation
-                base_name = os.path.splitext(filename)[0]
-                self.assertGreater(len(base_name), 15)
+    """Remote filename validation and the start upload packet"""
+
+    def setUp(self):
+        self.client = MassoClient()
+
+    def test_valid_names(self):
+        """Names up to 254 characters were stored intact on v5.13"""
+        for name in ["a.nc", "test.nc", "18_Inch__CLAD.nc", "x" * 254]:
+            with self.subTest(length=len(name)):
+                self.assertIsNone(MassoClient._validate_remote_name(name))
+
+    def test_invalid_names(self):
+        """255 kept only a short alias and 256 got no reply on v5.13"""
+        for name in ["", "x" * 255, "x" * 256, "café.tap"]:
+            with self.subTest(length=len(name)):
+                self.assertIsNotNone(MassoClient._validate_remote_name(name))
+
+    def test_start_packet_matches_captures(self):
+        """30 bytes for 'adaptive.nc' (file-upload2) and 34 for '1st-test-al.nc' (file-upload)"""
+        p = self.client._build_start_packet(457325, "adaptive.nc")
+        self.assertEqual(p, bytes.fromhex("7e8403000a6dfa06000000015c0061646170746976652e6e630000000000"))
+        p = self.client._build_start_packet(442, "1st-test-al.nc")
+        self.assertEqual(p, bytes.fromhex("634b03000aba0100000000015c003173742d746573742d616c2e6e63000000000000"))
+
+    def test_start_packet_alignment(self):
+        """Payload after the CRC is a multiple of 4 bytes, minimum 28"""
+        for n in (1, 11, 12, 14, 15, 16, 100, 254):
+            with self.subTest(length=n):
+                p = self.client._build_start_packet(100, "x" * n)
+                self.assertEqual((len(p) - 2) % 4, 0)
+                self.assertGreaterEqual(len(p) - 2, 28)
+                self.assertEqual(p[:2], self.client._calculate_checksum(p[2:]))
 
 
 def run_tests():

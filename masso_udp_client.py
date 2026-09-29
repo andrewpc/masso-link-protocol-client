@@ -297,10 +297,9 @@ class MassoClient:
                 remote_filename = basename
                 print(f"[+] Uploading {basename} ({filesize} bytes)...")
             
-            # Check filename length (max 15 characters for 30-byte packet)
-            if len(remote_filename) > 15:
-                print(f"[-] Filename too long: {remote_filename} ({len(remote_filename)} chars, max 15)")
-                print("[-] Try using a shorter filename")
+            name_error = self._validate_remote_name(remote_filename)
+            if name_error:
+                print(f"[-] {name_error}")
                 return False
 
             if chunk_size <= 0:
@@ -311,25 +310,8 @@ class MassoClient:
                 print("[!] Warning: large chunk sizes may be rejected by the controller")
 
             # 1. Send Start Upload Command
-            # Format: [Checksum 2][Magic 2][Type 0x0A][FileSize 4][00 00 01][5c 00][Filename ASCII][0x00][Padding 0x00 ...]
-            payload = bytearray()
-            payload.extend(b'\x03\x00')             # Magic
-            payload.append(0x0A)                     # Type
-            payload.extend(filesize.to_bytes(4, 'little'))  # File size
-            payload.extend(b'\x00\x00\x01')         # Unknown (3 bytes)
-            payload.extend(b'\x5c\x00')               # Backslash + null
-            payload.extend(remote_filename.encode('ascii'))
-            payload.append(0x00)                     # Null terminator
+            packet = self._build_start_packet(filesize, remote_filename)
 
-            # Pad to match capture length (30 bytes total including checksum)
-            # Payload should be 28 bytes before checksum
-            while len(payload) < 28:
-                payload.append(0x00)
-
-            # Calculate and prepend checksum
-            checksum = self._calculate_checksum(payload)
-            packet = checksum + payload
-            
             print(f"    Sending Start Upload (Length: {len(packet)} bytes)...")
             
             # Send with retry
@@ -396,6 +378,44 @@ class MassoClient:
             traceback.print_exc()
             return False
             
+    # v5.13: 254 characters is stored intact, 255 uploads but keeps only a short 8.3 alias,
+    # and 256 gets no reply (and appeared to hang the controller), so refuse it up front.
+    MAX_REMOTE_NAME_LEN = 254
+
+    @classmethod
+    def _validate_remote_name(cls, name):
+        """Return an error message if the remote name can't be used, else None."""
+        if not name:
+            return "Remote filename is empty"
+        try:
+            name.encode('ascii')
+        except UnicodeEncodeError:
+            return f"Filename must be ASCII: {name}"
+        if len(name) > cls.MAX_REMOTE_NAME_LEN:
+            return (f"Filename too long: {name} ({len(name)} chars, "
+                    f"max {cls.MAX_REMOTE_NAME_LEN})")
+        return None
+
+    def _build_start_packet(self, filesize, remote_filename):
+        """Build the start upload packet (type 0x0A).
+
+        Format: [CRC 2][03 00][0A][size 4][00 00 01][5c 00][name ASCII][00][padding]
+        The payload after the CRC is padded to a multiple of 4 bytes, with a 28 byte
+        minimum (30 byte packet, as in captures). Captures show a 34 byte packet for a
+        14 character name, and names of 15 to 254 characters were stored intact on v5.13
+        using 16 + ceil4(len + 1) bytes.
+        """
+        name = remote_filename.encode('ascii')
+        payload = bytearray(b'\x03\x00\x0A')
+        payload.extend(filesize.to_bytes(4, 'little'))
+        payload.extend(b'\x00\x00\x01')  # Unknown (3 bytes)
+        payload.extend(b'\x5c\x00')      # Backslash + null
+        payload.extend(name)
+        payload.append(0x00)             # Null terminator
+        target = max(28, 16 + ((len(name) + 1 + 3) // 4) * 4)
+        payload.extend(b'\x00' * (target - len(payload)))
+        return self._calculate_checksum(payload) + bytes(payload)
+
     @staticmethod
     def _chunk_trailer_len(chunk_len):
         """Trailer bytes for a short final chunk: payload after the CRC is a multiple of 4."""
@@ -923,15 +943,15 @@ class MassoClient:
                         date_prefix = datetime.now().strftime('%m%d-')
                         name, ext = os.path.splitext(basename)
                         prefixed_filename = f"{date_prefix}{name}{ext}"
-                        # Check if prefixed filename fits within 15 char limit
-                        if len(prefixed_filename) <= 15:
+                        # Check if prefixed filename fits within the remote name limit
+                        if len(prefixed_filename) <= self.MAX_REMOTE_NAME_LEN:
                             remote_filename = prefixed_filename
                         else:
-                            print(f"[-] Date prefix would make filename too long ({len(prefixed_filename)} chars, max 15)")
+                            print(f"[-] Date prefix would make filename too long ({len(prefixed_filename)} chars, max {self.MAX_REMOTE_NAME_LEN})")
                             print(f"    Using original filename: {basename}")
                     
-                    if len(remote_filename) > 15:
-                        print(f"[-] Skipping {remote_filename} - filename too long ({len(remote_filename)} chars, max 15)")
+                    if len(remote_filename) > self.MAX_REMOTE_NAME_LEN:
+                        print(f"[-] Skipping {remote_filename} - filename too long ({len(remote_filename)} chars, max {self.MAX_REMOTE_NAME_LEN})")
                         # Add to state to prevent repeated checks
                         uploaded_files[file_id] = {
                             'uploaded_at': time.time(),

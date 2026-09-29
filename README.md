@@ -72,7 +72,7 @@ A Python-based command-line tool for communicating with the Masso Link controlle
    python masso_udp_client.py --host 192.168.1.32 --monitor
    ```
 
-**Note**: Filenames must be 15 characters or less. For interactive mode, run without flags: `python masso_udp_client.py --host <IP>`
+**Note**: Filenames can be up to 254 characters (ASCII only). For interactive mode, run without flags: `python masso_udp_client.py --host <IP>`
 
 ## Usage
 
@@ -278,7 +278,7 @@ The watch mode prevents duplicate uploads by maintaining state:
   - Files are only uploaded if size or modification time changes
   - State persists between client restarts
   - Missing or corrupted state files are handled gracefully (starts fresh)
-  - Files with invalid names (>15 chars) are skipped and remembered
+  - Files with invalid names (>254 chars) are skipped and remembered
   - Failed uploads are tracked to prevent immediate retry loops
   - Use `clearwatch <dir>` command to reset the state file
   - Or manually delete `.masso_watch_state.json` from the directory
@@ -286,12 +286,12 @@ The watch mode prevents duplicate uploads by maintaining state:
 ### Filename Requirements
 
 When uploading files to the MASSO controller:
-- **Maximum filename length**: 15 characters
+- **Maximum filename length**: 254 characters (255 keeps only a short alias on the controller, 256 gets no reply; observed on v5.13)
 - **Supported characters**: ASCII only
 - **Subdirectories**: Only if they already exist on the MASSO
 - **Path separator**: Use backslash `\` for subdirectories, not forward slash `/`
 
-Files with names longer than 15 characters will be automatically skipped in watch mode.
+Files with names longer than 254 characters will be automatically skipped in watch mode.
 
 ## Debug Mode
 
@@ -349,7 +349,7 @@ python masso_udp_client.py --host <IP> --upload file1.nc file2.nc --date-prefix
 ```
 
 ### Smart Filename Handling
-- **Length validation**: Respects 15-character filename limit
+- **Length validation**: Respects the 254-character filename limit
 - **Fallback behavior**: Uses original filename if prefix makes it too long
 - **Clear feedback**: Shows when prefix is applied or skipped
 - **Consistent behavior**: Works same for manual and watch uploads
@@ -357,7 +357,7 @@ python masso_udp_client.py --host <IP> --upload file1.nc file2.nc --date-prefix
 ### Example Output
 ```
 [+] Detected new/changed NC file: part-program.nc
-[-] Date prefix would make filename too long (18 chars, max 15)
+[-] Date prefix would make filename too long (255 chars, max 254)
     Using original filename: part-program.nc
 [+] Auto-upload watching /path/to/files with date prefix (poll every 2.0s)
 ```
