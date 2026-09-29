@@ -100,6 +100,13 @@ python masso_udp_client.py --host <IP> --tools
 python masso_udp_client.py --host <IP> --tools --log  # With logging
 ```
 
+**Reset the Job Counter**
+```bash
+python masso_udp_client.py --host <IP> --reset-job-count
+# Prints the value it had before: "Job counter reset (was 1)"
+```
+Sends the type 0x05 packet, which zeroes the controller's job counter. Refused while a job is running. Verified on a v5.13 lathe only.
+
 **Upload Files**
 ```bash
 # Upload single file

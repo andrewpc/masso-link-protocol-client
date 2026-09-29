@@ -60,7 +60,8 @@ Example from a MASSO Link capture at 13:20:58 on 28 Nov 2025:
 ### Short Status / Job Counter Reset (Type 0x05)
 - **Request**: 10 bytes total, magic `0x03 0x00`, type `0x05`, 5 zero bytes (payload meaning untested)
 - **Response**: 10 bytes, e.g. `aa cc 03 00 05 64 00 ff 7f 00`. The 5 payload bytes match status bytes 5-9 from just before the request (progress, run flag, fault byte, job count low bytes).
-- **Side effect**: the request zeroes the job counter (status byte 8 went from `0x7f` to `0x00`; the user confirmed the machine's job counter read 0 afterwards). This is a control function, not a read-only query. Repeated once: the reply then carried counter 0 and nothing changed. Clearing a non-zero counter was seen once on v5.13.
+- **Side effect**: the request zeroes the job counter (status byte 8 went from `0x7f` to `0x00`; the user confirmed the machine's job counter read 0 afterwards). This is a control function, not a read-only query. Repeated once: the reply then carried counter 0 and nothing changed. Clearing a non-zero counter was seen twice on v5.13 (from 127, and from 1 via `--reset-job-count`).
+- **Client**: `python masso_udp_client.py --host <IP> --reset-job-count`, or `MassoClient.reset_job_count()`. It refuses to send while the last status shows a job running.
 
 ### Short Status Query (Type 0x07)
 - **Request**: 10 bytes total, type `0x07`, 5 zero bytes

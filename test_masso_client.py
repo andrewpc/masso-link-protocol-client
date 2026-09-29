@@ -374,6 +374,37 @@ class TestUploadPackets(unittest.TestCase):
         self.assertEqual(packet[:2], self.client._calculate_checksum(packet[2:]))
 
 
+class TestResetJobCount(unittest.TestCase):
+    """Type 0x05 (reset job counter), found by probing a v5.13 controller"""
+
+    def setUp(self):
+        self.client = MassoClient()
+        self.client.send_packet = Mock()
+
+    def test_packet_matches_sent_probe(self):
+        """Byte for byte the packet sent on the live controller"""
+        self.assertEqual(self.client._build_reset_job_count_packet().hex(), "748b0300050000000000")
+
+    def test_refuses_while_running(self):
+        status = bytearray(270)
+        status[6] = 0x02
+        self.client.last_status = bytes(status)
+        self.assertIsNone(self.client.reset_job_count(timeout=0.1))
+        self.client.send_packet.assert_not_called()
+
+    def test_returns_reply_payload(self):
+        """Reply payload is status bytes 5-9 from before the reset"""
+        def reply(*args, **kwargs):
+            self.client._short_status = bytes([0x64, 0x00, 0xFF, 0x7F, 0x00])
+            self.client._short_status_received.set()
+        self.client.send_packet.side_effect = reply
+        result = self.client.reset_job_count(timeout=0.1)
+        self.assertEqual(int.from_bytes(result[3:5], 'little'), 127)
+
+    def test_no_reply_returns_none(self):
+        self.assertIsNone(self.client.reset_job_count(timeout=0.1))
+
+
 if __name__ == '__main__':
     print("MASSO UDP Client Test Suite")
     print("=" * 50)

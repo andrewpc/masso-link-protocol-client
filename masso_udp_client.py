@@ -35,6 +35,8 @@ class MassoClient:
         self._upload_ack_received = threading.Event()  # For synchronous upload
         self._last_ack_packet = None  # Stores last upload ACK payload
         self.job_count = None  # Latest job counter from status packets
+        self._short_status = None  # Payload (status bytes 5-9) of the last type 0x05 reply
+        self._short_status_received = threading.Event()
         self._last_line_change_time = None
         self._last_line_value = None
         self._in_feed_hold = False
@@ -97,6 +99,32 @@ class MassoClient:
         checksum = self._calculate_checksum(payload)
         return checksum + payload
     
+    def _build_reset_job_count_packet(self):
+        """Build the type 0x05 packet (reset job counter, returns a short status).
+
+        Found by probing a v5.13 lathe; the payload is 5 zero bytes.
+        """
+        payload = bytes([0x03, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00])
+        checksum = self._calculate_checksum(payload)
+        return checksum + payload
+
+    def reset_job_count(self, timeout=3.0):
+        """Reset the controller's job counter to zero.
+
+        Returns the reply payload (status bytes 5-9 from just before the reset:
+        progress, run flag, fault byte, job count low 2 bytes), or None if the
+        controller did not reply. Refuses to send while a job is running.
+        """
+        if self.last_status is not None and self.last_status[6] != 0x00:
+            print("[-] Machine is running - job counter not reset")
+            return None
+        self._short_status = None
+        self._short_status_received.clear()
+        self.send_packet(self._build_reset_job_count_packet(), message="Sent reset job counter")
+        if self._short_status_received.wait(timeout=timeout):
+            return self._short_status
+        return None
+
     def start(self):
         """Start the client, finding an available port."""
         for port in range(11000, 11051):
@@ -627,6 +655,12 @@ class MassoClient:
                             ack_type = "Start Upload" if pkt_type == 0x0A else "Data"
                             print(f"\n[<] Received {ack_type} ACK ({len(data)} bytes)")
                     
+                    # Handle Short Status reply to the job counter reset (Type 0x05)
+                    elif pkt_type == 0x05:
+                        self._short_status = data[5:10]
+                        self._short_status_received.set()
+                        self._log(f"Short status: {data[5:10].hex()}")
+
                     # Handle Configuration Response (Type 0x03)
                     elif pkt_type == 0x03:
                         # Extract serial number from bytes 5-6 (little-endian)
@@ -1246,6 +1280,8 @@ def main():
                        help='Get tool list and exit')
     parser.add_argument('--status', action='store_true',
                        help='Show current status and exit')
+    parser.add_argument('--reset-job-count', action='store_true',
+                       help='Reset the controller job counter to zero and exit (refused while a job is running)')
     parser.add_argument('--upload', nargs='+', metavar='FILE[:REMOTE]',
                        help='Upload file(s). Use FILE:REMOTE to specify remote path')
     parser.add_argument('--date-prefix', action='store_true',
@@ -1268,7 +1304,7 @@ def main():
     args = parser.parse_args()
     
     # Default to interactive mode if no other mode specified
-    if not any([args.tools, args.upload, args.watch is not None, args.monitor, args.test_packet, args.test_sequence]):
+    if not any([args.tools, args.reset_job_count, args.upload, args.watch is not None, args.monitor, args.test_packet, args.test_sequence]):
         args.interactive = True
     
     try:
@@ -1287,6 +1323,15 @@ def main():
             
             if args.tools:
                 tools_mode(client, args.log)
+            elif args.reset_job_count:
+                # Wait briefly for a status packet so the running check has data
+                time.sleep(1.5)
+                reply = client.reset_job_count()
+                if reply is None:
+                    print("[-] Job counter not reset (no reply or machine running)")
+                    return 1
+                before = int.from_bytes(reply[3:5], 'little')
+                print(f"[+] Job counter reset (was {before})")
             elif args.upload:
                 upload_mode(client, args, args.log)
             elif args.watch is not None:
