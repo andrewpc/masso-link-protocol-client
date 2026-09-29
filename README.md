@@ -4,7 +4,7 @@
 
 **Disclaimer**: This is an unofficial, experimental implementation of the MASSO Link protocol. This software is:
 - **NOT** supported by or affiliated with MASSO
-- **NOT** guaranteed to work with all MASSO controllers or firmware versions (currently tested with v5.09)
+- **NOT** guaranteed to work with all MASSO controllers or firmware versions (currently tested with v5.09 and v5.13)
 - **ONLY** tested with controller in Lathe mode - may not work or need changes for Mill/Router modes - Please test on your non-Lathe controller!
 - **ONLY** tested on my own personal device so far - community testing needed
 - **NOT** suitable for production use or critical applications
@@ -43,7 +43,9 @@ This project was created to address limitations in the official MASSO Link softw
 
 A Python-based command-line tool for communicating with the Masso Link controller protocol.
 
-**⚠️ Important**: Do not run multiple instances of this client or use the official MASSO Link app simultaneously. The controller broadcasts responses on UDP port 65535, which all listening clients receive. Running multiple clients can cause ACK confusion, upload failures, and unpredictable behavior as clients may intercept each other's responses.
+**⚠️ Important**: Do not run multiple instances of this client or use the official MASSO Link app simultaneously. The controller sends its replies from UDP port 65535 to port 11000 (and sometimes also to the sender's port), whichever program is sending. Running multiple clients can cause ACK confusion, upload failures, and unpredictable behavior as clients may receive each other's responses.
+
+**Clock**: Connecting sets the controller's clock to this PC's time. Versions before v0.0.3 sent zeros, which reset the controller clock to 12:00 AM on every connect.
 
 ## Getting Started
 
@@ -52,7 +54,7 @@ A Python-based command-line tool for communicating with the Masso Link controlle
 1. **Clone or download this repository**
    ```bash
    git clone https://github.com/andrewpc/masso-link-protocol-client.git
-   cd masso_client
+   cd masso-link-protocol-client
    ```
 
 2. **Find your MASSO controller's IP address** (check controller network settings or router DHCP list)
@@ -62,17 +64,17 @@ A Python-based command-line tool for communicating with the Masso Link controlle
    python masso_udp_client.py --host 192.168.1.32 --upload myfile.nc
    ```
 
-3. **Watch a directory for auto-upload**
+4. **Watch a directory for auto-upload**
    ```bash
    python masso_udp_client.py --host 192.168.1.32 --watch /path/to/nc/files
    ```
 
-4. **Monitor machine status**
+5. **Monitor machine status**
    ```bash
    python masso_udp_client.py --host 192.168.1.32 --monitor
    ```
 
-**Note**: Filenames can be up to 254 characters (ASCII only). For interactive mode, run without flags: `python masso_udp_client.py --host <IP>`
+**Note**: Remote names can be up to 254 characters including any folder (ASCII only). For interactive mode, run without flags: `python masso_udp_client.py --host <IP>`
 
 ## Usage
 
@@ -109,7 +111,8 @@ python masso_udp_client.py --host <IP> --upload test.nc file2.nc
 # Upload with custom remote filename
 python masso_udp_client.py --host <IP> --upload test.nc:my_program.nc
 
-# Upload to existing remote directory
+# Upload to existing remote directory (the folder must already exist on the MASSO;
+# "subdir/my_program.nc" also works, "/" is converted to "\")
 python masso_udp_client.py --host <IP> --upload test.nc:subdir\my_program.nc
 
 # Upload with date prefix (MMDD- format for easy identification)
@@ -158,19 +161,17 @@ python masso_udp_client.py --host <IP> --monitor --duration 10 --debug  # Debug 
 ```
 
 **Packet Testing**
-```bash
-# Send custom hex packet
-python masso_udp_client.py --host <IP> --test-packet "03 00 02 f8 2a 00 00 0b"
 
-# Send packet with debug output
-python masso_udp_client.py --host <IP> --debug --test-packet "03 00 04 01"
+The hex is sent exactly as given, so it must start with the 2-byte CRC (see [PROTOCOL_SPEC.md](PROTOCOL_SPEC.md#checksum-calculation)).
+```bash
+# Send a discovery packet (CRC c0 90, then magic, type and payload)
+python masso_udp_client.py --host <IP> --test-packet "c0 90 03 00 02 f8 2a 00 00 0b"
+
+# Send a tool request for tool 1, with debug output
+python masso_udp_client.py --host <IP> --debug --test-packet "92 b1 03 00 08 01 22 2c 1c 0b"
 
 # Test packet sequence from file (one hex packet per line)
 python masso_udp_client.py --host <IP> --test-sequence packets.txt
-
-# Examples for protocol exploration
-python masso_udp_client.py --host <IP> --test-packet "03 00 08 01"  # Tool request
-python masso_udp_client.py --host <IP> --test-packet "03 00 06 00"  # Job control
 ```
 
 **Debug Mode**
@@ -180,7 +181,7 @@ python masso_udp_client.py --host <IP> --tools --debug
 python masso_udp_client.py --host <IP> --upload test.nc --debug
 python masso_udp_client.py --host <IP> --monitor --debug
 python masso_udp_client.py --host <IP> --watch --debug
-python masso_udp_client.py --host <IP> --test-packet "03 00 02 f8 2a 00 00 0b" --debug
+python masso_udp_client.py --host <IP> --test-packet "c0 90 03 00 02 f8 2a 00 00 0b" --debug
 ```
 
 **Logging**
@@ -191,7 +192,7 @@ The `--log` flag works with all modes to save activity to a timestamped log file
 ## Features
 
 - **UDP Communication**: Send and receive UDP packets to/from MASSO
-- **Background Listener**: Automatically listens for broadcasts on port 65535
+- **Background Listener**: Binds the first free UDP port from 11000-11050 and listens for controller replies
 - **Interactive Mode**: Send commands and observe responses in real-time
 - **Status Monitoring**: Real-time machine status display with feed hold detection
 - **Tool Management**: Request and display tool list from the controller
@@ -232,10 +233,13 @@ Once in interactive mode, available commands:
 - `--interactive` - Run in interactive mode (default)
 - `--tools` - Get tool list and exit
 - `--upload FILE[:REMOTE]` - Upload file(s). Use FILE:REMOTE to specify remote path
+- `--date-prefix` - Add an MMDD- prefix to uploaded filenames (with `--upload` or `--watch`)
 - `--watch [DIR]` - Watch directory for .nc file changes (default: current directory)
 - `--monitor` - Monitor real-time status
 - `--duration SECONDS` - Run monitor mode for specified seconds, then exit (requires --monitor)
 - `--log` - Enable logging to file (works with all modes)
+- `--test-packet HEX` - Send one raw packet (including its CRC) and capture the response
+- `--test-sequence FILE` - Send raw packets from a file, one hex packet per line
 - `--debug` - Enable debug mode to log all raw packets (filters out keepalive responses and duplicate status packets)
 
 ### Upload Files (Interactive Mode)
@@ -255,7 +259,7 @@ watchoff                    # Stop watching
 **Important Notes**:
 - See "Filename Requirements" section for upload constraints
 - Subdirectories: Only if they already exist on the MASSO
-- Use backslash `\` for subdirectories, not forward slash `/`
+- Use backslash `\` for subdirectories; a forward slash `/` is converted to `\` automatically
 
 ## Protocol Implementation
 
@@ -265,6 +269,7 @@ The client implements the MASSO UDP protocol. For detailed protocol specificatio
 
 Supports uploading G-code/NC files to the controller:
 - Automatic file chunking with retry logic
+- Every ACK is checked (start accepted, and each data ACK names the next expected chunk)
 - Progress reporting
 - Remote path specification
 - Auto-upload watcher for continuous development
@@ -286,10 +291,12 @@ The watch mode prevents duplicate uploads by maintaining state:
 ### Filename Requirements
 
 When uploading files to the MASSO controller:
-- **Maximum filename length**: 254 characters (255 keeps only a short alias on the controller, 256 gets no reply; observed on v5.13)
+- **Maximum length**: 254 characters, counting any folder part (e.g. `MASSO\part.nc` is 13). Longer names are refused before anything is sent.
 - **Supported characters**: ASCII only
-- **Subdirectories**: Only if they already exist on the MASSO
-- **Path separator**: Use backslash `\` for subdirectories, not forward slash `/`
+- **Subdirectories**: Only if they already exist on the MASSO (an upload into a missing folder is ignored by the controller)
+- **Path separator**: Backslash `\`; a forward slash `/` is converted to `\` automatically
+
+Why 254 (observed on a v5.13 lathe): a 255-character file name uploads but is kept only as a short 8.3 alias (e.g. `T0929_~9.NC`), and a 256-character name in the root, or a 260-character path in a folder, got no reply and froze the controller until it was power cycled.
 
 Files with names longer than 254 characters will be automatically skipped in watch mode.
 
@@ -359,8 +366,7 @@ python masso_udp_client.py --host <IP> --upload file1.nc file2.nc --date-prefix
 ### Example Output
 ```
 [+] Detected new/changed NC file: part-program.nc
-[-] Date prefix would make filename too long (255 chars, max 254)
-    Using original filename: part-program.nc
+[-] Date prefix would make filename too long (255 chars, max 254); using original name: part-program.nc
 [+] Auto-upload watching /path/to/files with date prefix (poll every 2.0s)
 ```
 
@@ -409,8 +415,8 @@ python masso_udp_client.py --host 192.168.1.32 --monitor --duration 60 --log
 
 The client automatically detects feed hold conditions by monitoring:
 - Line counter freezes while machine state is "Running"
-- File state is "Executing"
-- Duration exceeds configurable threshold (default 1.5 seconds)
+- Line counter is greater than 0
+- Duration exceeds a threshold (1.5 seconds)
 
 ## Tool Management
 
@@ -428,6 +434,18 @@ The client can request the complete tool list from the controller:
 
 - `masso_udp_client.py` - Interactive UDP client (primary tool)
 - `PROTOCOL_SPEC.md` - Detailed protocol specification
+- `test_masso_client.py`, `test_simple.py` - Unit tests (no controller needed)
+- `test_real_controller.py` - Tests against a real controller
+- `run_tests.py` - Runs all three
+
+## Testing
+
+```bash
+# Unit tests only (safe, no network)
+python -m unittest test_masso_client test_simple
+```
+
+`run_tests.py` also runs `test_real_controller.py`, which connects to the hardcoded IP `192.168.1.32` and uploads a file named `test.nc`, overwriting any file with that name on the controller.
 
 ## Contributing
 
