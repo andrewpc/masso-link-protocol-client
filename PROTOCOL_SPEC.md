@@ -17,6 +17,7 @@ This document describes the MASSO controller UDP protocol as implemented in `mas
 - **Controller Port**: 65535 (the controller sends its replies from this port)
 - **Client Port**: The client binds the first free port in 11000-11050 and sends from it
 - **Reply Destination**: The controller sends replies to port 11000, and sometimes also to the port the request came from. MASSO Link sends from an ephemeral port and still gets its replies on 11000.
+- **Additional plasma-controller finding**: On a 5-axis MASSO Touch v5.13 / Core 2.05, repeated uploads became unreliable when reusing the same TX socket. Recreating only the ephemeral TX/upload socket before each upload restored repeat-upload reliability while leaving the bound status RX socket running. This behavior is used by Send-to-MASSO Manager; it has not been confirmed as necessary on the v5.13 lathe.
 - **Packet Structure**: `[CRC16-CCITT 2 bytes][Magic 0x03 0x00 2 bytes][Type 1 byte][Payload...]`
 
 ## Packet Types
@@ -68,6 +69,10 @@ Example from a MASSO Link capture at 13:20:58 on 28 Nov 2025:
   - Tool index at byte 5
   - Tool name starts at byte 6, null-terminated
 
+#### Tool-table scope caveat
+
+The observed type-`0x08` response only confirms tool index plus null-terminated tool name. MASSO's full tool table contains additional fields in the UI, but offsets/diameter/wear/slot fields have not been decoded from this packet exchange in the Touch/G3 work. Implementations should keep tool-table access read-only until the complete binary format is verified.
+
 ### File Upload - Start Upload (Type 0x0A)
 - **Request**: Variable length
   - Magic: `0x03 0x00`
@@ -84,6 +89,28 @@ Example from a MASSO Link capture at 13:20:58 on 28 Nov 2025:
   - Bytes 6 onward: the previous upload's final chunk counter, not a status code. After a 282-chunk upload the next start ACK was `0a 00 1a 01 00 00` (`0x011a` = 282). Do not require these bytes to be zero.
   - If the name is invalid (folder missing, `/` in the name, over 255 characters), the controller sends no reply at all. Over 255 characters can also freeze it (see Filename Restrictions).
 
+#### Alternate folder-aware start packet observed on plasma controllers
+
+Additional captures from a 5-axis MASSO G3 v5.13 / Core 2.00 showed an alternate folder-aware start packet in which folder and filename are carried separately. Total UDP payload lengths of 38 and 50 bytes were observed in the Touch/G3 capture set; the 50-byte form was captured on the G3.
+
+Observed layout after the CRC:
+
+```text
+03 00 0A
+[file size 4 LE]
+00 00
+[folder length 1]
+[folder ASCII]
+00
+[filename ASCII]
+00
+[padding to 4-byte boundary]
+```
+
+A known-good G3 target used folder `\5178-24_44-IDUC\`. This is a controller-specific observation and should not replace the simpler combined-name format verified on the v5.13 lathe.
+
+The same G3 test set also produced a start-upload reject with byte 5 = `0xF7` (`f7 00` at bytes 5-6). This reject code has not been reproduced on the v5.13 lathe.
+
 ### File Upload - Data Chunk (Type 0x0B)
 - **Request**: Variable length
   - Magic: `0x03 0x00`
@@ -96,7 +123,7 @@ Example from a MASSO Link capture at 13:20:58 on 28 Nov 2025:
 - **Short final chunk**: sent compact with its real length. The packet after the CRC must be a multiple of 4 bytes, so the trailer is `(-(11 + length)) % 4`, with 0 becoming 4 (1 to 4 bytes).
   - Examples: 863 bytes → 2-byte trailer (878-byte packet, from a v5.09 capture); 1000 → 1; 1001 → 4; 1002 → 3; 1003 → 2 (all accepted on v5.13).
   - A wrong trailer makes the controller ignore the chunk: a 1003-byte chunk with a 4-byte trailer got no ACK on v5.13.
-- **Fallback**: pad the final chunk's data area to 1422 bytes with a 3-byte trailer, keeping the real length in the length field. Reports from other controllers say some ignore the compact form and need this. The client uses it only if the compact chunk gets no ACK. It has not been exercised on v5.13, which always accepted the compact form.
+- **Fallback**: pad the final chunk's data area to 1422 bytes with a 3-byte trailer, keeping the real length in the length field. The client uses it only if the compact chunk gets no ACK. Historical testing on a 5-axis MASSO G3 v5.13 / Core 2.00 showed this fallback recovering 411-byte and 180,499-byte uploads; however, those compact packets were generated with an older, incorrect odd/even trailer rule. Both final lengths were congruent to 3 mod 4 and should have used a 2-byte trailer. Therefore those tests prove the fallback is useful, but do **not** prove the G3 inherently requires full-size final packets. Re-testing with the corrected compact rule is still needed.
   - Versions of this client before v0.0.3 padded the final chunk to 1422 bytes and also set the length field to 1422. v5.13 accepted that and the files had the right number of lines, but whether the padding zeros ended up in the file was not checked.
 - **Response**: 10 bytes
   - Byte 4: `0x0B`
@@ -157,6 +184,7 @@ Key fields:
   - `0x02`: Actively Running
   - **Note**: Internal operations like Homing or Probing often appear as "Running" and may execute internal macros.
 - Byte 7: `0xFF` in every packet in our captures, including during an E-Stop. Others have reported it changing (`0x15` during a plasma torch breakaway), so it may be a fault code; not verified here.
+  - On a 5-axis MASSO Touch v5.13 / Core 2.05, a torch-breakaway test changed byte 7 `0xFF -> 0x15 -> 0xFF`. The `0x15` state lasted about 8.1 seconds in that capture. This confirms byte 7 is not constant across controller types/configurations.
 - Bytes 8-11: Job count (little-endian)
 - Byte 12: User Prompt Waiting Flag (Tool Change, M0, M1, etc.)
   - `0x01`: Normal operation
@@ -164,6 +192,7 @@ Key fields:
 - Byte 13: Line number (0–255, single byte)
   - **Note**: During Homing, this typically increments as MASSO runs its internal homing macro.
 - Bytes 14–16: Always `0x00` — reserved/unused in observed captures
+  - Controller-specific difference: on a 5-axis MASSO Touch v5.13 / Core 2.05 and a 5-axis MASSO G3 v5.13 / Core 2.00, bytes 13-16 behaved as a little-endian elapsed-seconds counter rather than byte 13 being an independent line byte. Examples observed on the plasma controllers include `d1 00 00 00` at 3:29 elapsed (209 s), `ff 00 00 00` at 255 s, `00 01 00 00` at 256 s, and `1d 01 00 00` at 285 s. This differs from the lathe captures above and should be treated as controller/firmware-specific until more captures explain the difference.
 - Bytes 17-80: Filename of the loaded file (null-terminated, up to 63 bytes)
 - Bytes 81-269: Unused/Padded with `0x00` during normal operation
 
@@ -203,7 +232,26 @@ CRC16-CCITT algorithm:
   - A leading backslash (`\MASSO\file.nc`) is untested; the packet already has one before the name
 - Directories must exist on MASSO (not created automatically); an upload into a missing folder gets no reply on v5.13
 
+### Plasma-controller filename/folder observations
+
+The following were observed in the Touch/G3 plasma test set (5-axis MASSO Touch v5.13 / Core 2.05 and 5-axis MASSO G3 v5.13 / Core 2.00):
+
+- `part#12.tap` uploaded successfully, so `#` is accepted in at least these environments.
+- A non-ASCII filename such as `café.tap` failed; plain ASCII is the safe choice.
+- `.nc`, `.cnc`, `.tap`, `.eia`, and `.txt` were all accepted during testing.
+- Nested backslash-delimited paths worked.
+- Missing folders appeared to be created automatically in the plasma-controller tests, and existing files were overwritten.
+
+The missing-folder behavior directly differs from the v5.13 lathe result above, where the folder had to exist first. This should be treated as a controller/core-specific difference rather than a universal protocol rule.
+
 ## Error Handling
+
+Additional open questions from Touch/G3 plasma testing:
+
+- Why bytes 13-16 behave as elapsed seconds on the v5.13 plasma controllers while the v5.13 lathe capture treats byte 13 as a line value.
+- Whether the alternate folder-aware start packet is tied to controller type, core version, or MASSO Link behavior.
+- Whether any controller with the corrected compact trailer rule still genuinely requires the full-size final-packet fallback.
+- Full mapping of byte-7 fault/alarm values beyond the confirmed Touch torch-breakaway value `0x15`.
 
 - Upload packets are retried up to 3 times (4 attempts)
 - Timeout for ACK response: 2.0 seconds
